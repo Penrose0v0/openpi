@@ -20,6 +20,8 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.bridge_policy as bridge_policy
+import openpi.policies.fractal_policy as fractal_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -338,6 +340,108 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
+class LeRobotBridgeDataConfig(DataConfigFactory):
+    use_quantile_norm: bool = True
+
+    # Action keys that will be used to read the action sequence from the dataset.
+    action_sequence_keys: Sequence[str] = ("action",)
+
+    prompt_from_task: bool = True
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # Make inputs look like they come from the Libero environment
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/primary_image": "observation.images.image_0",
+                        # "observation/left_yellow_image": "observation.images.image_1",
+                        # "observation/right_blue_image": "observation.images.image_2",
+                        # "observation/wirst_image": "observation.images.image_3",
+                        "observation/state": "observation.state",
+                        "actions": "action",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+
+        # Prepare data for policy training
+        # Convert images to uint8 numpy arrays, add masks
+        data_transforms = _transforms.Group(
+            inputs=[
+                ### THE FOLLOWING bridge_policy MODULE IS MISSING ###
+                bridge_policy.BridgeInputs(
+                    action_dim=model_config.action_dim,
+                    model_type=model_config.model_type,
+                )
+            ],
+            outputs=[bridge_policy.BridgeOutputs()],
+        )
+
+        # Model transforms include things like tokenizing the prompt and action targets
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            use_quantile_norm=self.use_quantile_norm,
+            action_sequence_keys=self.action_sequence_keys,
+            prompt_from_task=self.prompt_from_task,
+        )
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotFractalDataConfig(DataConfigFactory):
+    # If provided, will be injected into the input data if the "prompt" key is not present.
+    default_prompt: str | None = None
+
+    # Action keys that will be used to read the action sequence from the dataset.
+    action_sequence_keys: Sequence[str] = ("action",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/primary_image": "observation.images.image",
+                        "observation/state": "observation.state",
+                        "actions": "action",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+
+        # Prepare data for policy training
+        # Convert images to uint8 numpy arrays, add masks
+        data_transforms = _transforms.Group(
+            inputs=[fractal_policy.FractalInputs(action_dim=model_config.action_dim)],
+            outputs=[fractal_policy.FractalOutputs()],
+        )
+        # Use delta actions (not for gripper)
+        # delta_action_mask = _transforms.make_bool_mask(6, -1)
+        # data_transforms = data_transforms.push(
+        #     inputs=[_transforms.DeltaActions(delta_action_mask)],
+        #     outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+        # )
+
+        # Model transforms include things like tokenizing the prompt and action targets
+        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
 class RLDSDroidDataConfig(DataConfigFactory):
     """
     Config for training on DROID, using RLDS data format (for efficient training on larger datasets).
@@ -394,7 +498,6 @@ class RLDSDroidDataConfig(DataConfigFactory):
             use_quantile_norm=model_config.model_type == ModelType.PI0_FAST,
             rlds_data_dir=self.rlds_data_dir,
             action_space=self.action_space,
-            filter_dict_path=self.filter_dict_path,
         )
 
 
@@ -747,6 +850,42 @@ _CONFIGS = [
         num_train_steps=10,
         wandb_enabled=False,
     ),
+    TrainConfig(
+        name="pi0_bridge_low_mem_finetune",
+        model=pi0.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
+        data=LeRobotBridgeDataConfig(
+            repo_id="local/bridge_lerobot",
+            base_config=DataConfig(
+                # local_files_only=True,  # Set to True for local-only datasets.
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        num_workers=8,
+    ),
+    TrainConfig(
+        name="pi0_fractal_low_mem_finetune",
+        model=pi0.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
+        data=LeRobotFractalDataConfig(
+            repo_id="local/fractal_lerobot",
+            base_config=DataConfig(
+                # local_files_only=True,  # Set to True for local-only datasets.
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("s3://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=40_000,
+        freeze_filter=pi0.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m"
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+
     #
     # RoboArena configs.
     #
