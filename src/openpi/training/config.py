@@ -397,6 +397,8 @@ class LeRobotBridgeDataConfig(DataConfigFactory):
 class LeRobotFractalDataConfig(DataConfigFactory):
     # If provided, will be injected into the input data if the "prompt" key is not present.
     default_prompt: str | None = None
+    use_quantile_norm: bool = True
+    prompt_from_task: bool = True
 
     # Action keys that will be used to read the action sequence from the dataset.
     action_sequence_keys: Sequence[str] = ("action",)
@@ -419,7 +421,12 @@ class LeRobotFractalDataConfig(DataConfigFactory):
         # Prepare data for policy training
         # Convert images to uint8 numpy arrays, add masks
         data_transforms = _transforms.Group(
-            inputs=[fractal_policy.FractalInputs(action_dim=model_config.action_dim)],
+            inputs=[
+                fractal_policy.FractalInputs(
+                    action_dim=model_config.action_dim,
+                    model_type=model_config.model_type,
+                )
+            ],
             outputs=[fractal_policy.FractalOutputs()],
         )
         # Use delta actions (not for gripper)
@@ -437,7 +444,9 @@ class LeRobotFractalDataConfig(DataConfigFactory):
             repack_transforms=repack_transform,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
+            use_quantile_norm=self.use_quantile_norm,
             action_sequence_keys=self.action_sequence_keys,
+            prompt_from_task=self.prompt_from_task,
         )
 
 
