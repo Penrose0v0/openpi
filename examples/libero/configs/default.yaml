@@ -1,0 +1,74 @@
+# Sample LIBERO evaluation config.
+# Run with:  uv run main.py --config configs/default.yaml
+
+# Model server
+host: "0.0.0.0"
+port: 8000
+resize_size: 224
+replan_steps: 5
+
+# Task suite
+task_suite_name: libero_spatial
+num_steps_wait: 10
+num_trials_per_task: 50
+one_task_per_scene_type: false
+
+# Rendering / output
+# video_out_path defaults to data/libero/<config_stem> (i.e. data/libero/default here).
+camera_resolution: 256
+seed: 7
+
+# Which rendered cameras feed the model. Both must appear in `cameras`.
+policy_image_camera: agentview
+policy_wrist_camera: robot0_eye_in_hand
+
+# Cameras to render. Each rendered camera shows up as obs["{name}_image"].
+# You can mix four kinds of entries:
+#   (a) Existing camera, default pose — just give a `name`
+#       (e.g. agentview, frontview, birdview, sideview, canonical_agentview,
+#       robot0_eye_in_hand, robot0_robotview).
+#   (b) Existing camera, modified pose — `name` + transforms (orbit/offset) and/or pos+quat.
+#   (c) Brand-new camera, explicit pose — any unused `name` + pos+quat.
+#   (d) Brand-new camera, inheriting agentview's per-scene default pose — any unused `name`
+#       WITHOUT pos+quat, optionally with orbit/offset to deviate. The "default pose" is
+#       LIBERO's scene-specific agentview value (e.g. living_room uses different numbers
+#       from kitchen), snapshot before any user override to agentview itself.
+#
+# Per-camera fields (all optional except `name`):
+#   save:         bool, default true. If false, render but don't write a video.
+#   save_subdir:  output folder under video_out_path. Defaults to `name`.
+#   pos, quat:    absolute pose in world frame. quat is (w, x, y, z). Must be set together.
+#   orbit_deg, orbit_center: rotate camera around world +Z through (cx, cy).
+#   offset_back:  translate along camera-local +Z (away from look dir), meters.
+#   offset_up:    translate along world +Z, meters.
+#   offset_right: translate along camera-local +X (image right), meters.
+#   rotate_180:   bool, default true. 180-deg rotate saved frames (matches LIBERO training convention).
+#                 Set to false for third-person cameras you want to view in native orientation.
+cameras:
+  - name: agentview
+    # Default agentview, unchanged. The model's observation/image comes from here.
+
+  - name: robot0_eye_in_hand
+    # Wrist camera feeds the model (policy_wrist_camera). save: false means it's
+    # still rendered but no mp4 is written. To stop rendering entirely, you'd
+    # have to remove it — but then the model would lose its wrist input.
+    save: false
+
+  # Existing arena camera with natural-orientation playback.
+  - name: frontview
+    rotate_180: false
+
+  # Brand-new camera with an explicit pose. Useful when you want a specific angle.
+  - name: cam1
+    pos: [0.8, -0.6, 1.8]
+    quat: [0.6532815, 0.2705981, 0.2705981, 0.6532815]   # (w, x, y, z)
+    rotate_180: false
+
+  # Brand-new camera inheriting agentview's per-scene default pose, then nudged.
+  # Equivalent to "what agentview would have looked like with +30 deg orbit and
+  # 20cm higher" — and it tracks each scene's agentview, so it Just Works for
+  # kitchen / living_room / study / floor / coffee_table / tabletop.
+  - name: cam2
+    orbit_deg: 30
+    offset_up: 0.2
+    rotate_180: false

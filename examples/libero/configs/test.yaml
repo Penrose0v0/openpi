@@ -1,0 +1,41 @@
+# Test LIBERO evaluation config.
+# Run with:  uv run main.py --config configs/test.yaml
+
+# Model server
+host: "0.0.0.0"
+port: 8000
+resize_size: 224
+replan_steps: 5
+
+# Task suite — 1 task, 1 trial
+task_suite_name: libero_10
+num_steps_wait: 10
+num_trials_per_task: 1
+one_task_per_scene_type: true
+
+# Rendering / output
+# video_out_path defaults to data/libero/<config_stem> (i.e. data/libero/test here).
+camera_resolution: 256
+seed: 7
+
+# Default agentview feeds the model.
+policy_image_camera: agentview
+policy_wrist_camera: robot0_eye_in_hand
+
+cameras:
+  - name: agentview
+  - name: robot0_eye_in_hand
+    save: false
+
+  # Right-back-upper view (in saved video, matching agentview's mirrored orientation):
+  # orbit from agentview default, then pull back along camera-local +Z and raise.
+  - name: cam_right_back
+    orbit_deg: -45
+    offset_back: 0.5
+    offset_up: 0.4
+
+  # Left-back-upper view (in saved video, matching agentview's mirrored orientation).
+  - name: cam_left_back
+    orbit_deg: 45
+    offset_back: 0.5
+    offset_up: 0.4
