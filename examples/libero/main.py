@@ -3,6 +3,7 @@ import dataclasses
 import logging
 import math
 import pathlib
+from typing import Set
 
 import imageio
 from libero.libero import benchmark
@@ -36,6 +37,13 @@ class Args:
     )
     num_steps_wait: int = 10  # Number of steps to wait for objects to stabilize i n sim
     num_trials_per_task: int = 50  # Number of rollouts per task
+    one_task_per_scene_type: bool = False  # If True, run only the first task encountered per scene type (kitchen/living_room/study)
+    agentview_orbit_deg: float = 0.0  # Orbit agentview around world +Z by this angle (deg, CCW viewed from +Z). 0 = no change.
+    agentview_orbit_center_x: float = 0.0  # XY center for the orbit (world frame).
+    agentview_orbit_center_y: float = 0.0
+    agentview_offset_back: float = 0.0  # Translate agentview along its local +Z (away from look direction), in meters.
+    agentview_offset_up: float = 0.0  # Translate agentview along world +Z, in meters.
+    agentview_offset_right: float = 0.0  # Translate agentview along its local +X (image right), in meters.
 
     #################################################################################################################
     # Utils
@@ -74,9 +82,17 @@ def eval_libero(args: Args) -> None:
 
     # Start evaluation
     total_episodes, total_successes = 0, 0
+    seen_scene_types: Set[str] = set()
     for task_id in tqdm.tqdm(range(num_tasks_in_suite)):
         # Get task
         task = task_suite.get_task(task_id)
+
+        if args.one_task_per_scene_type:
+            scene_type = _scene_type_from_task_name(task.name)
+            if scene_type in seen_scene_types:
+                logging.info(f"Skipping {task.name}: already ran a {scene_type} task")
+                continue
+            seen_scene_types.add(scene_type)
 
         # Get default LIBERO initial states
         initial_states = task_suite.get_task_init_states(task_id)
@@ -91,6 +107,19 @@ def eval_libero(args: Args) -> None:
 
             # Reset environment
             env.reset()
+            # robosuite's reset rebuilds the model, restoring cam_pos to XML values.
+            # Re-apply the agentview orbit after every reset.
+            _orbit_agentview(
+                env,
+                args.agentview_orbit_deg,
+                (args.agentview_orbit_center_x, args.agentview_orbit_center_y),
+            )
+            _translate_agentview(
+                env,
+                args.agentview_offset_back,
+                args.agentview_offset_up,
+                args.agentview_offset_right,
+            )
             action_plan = collections.deque()
 
             # Set initial states
@@ -99,6 +128,7 @@ def eval_libero(args: Args) -> None:
             # Setup
             t = 0
             replay_images = []
+            episode_states = []
 
             logging.info(f"Starting episode {task_episodes+1}...")
             while t < max_steps + args.num_steps_wait:
@@ -149,6 +179,17 @@ def eval_libero(args: Args) -> None:
 
                     action = action_plan.popleft()
 
+                    # Record state at the moment the action is issued (pre-step)
+                    episode_states.append(
+                        np.concatenate(
+                            (
+                                obs["robot0_eef_pos"],
+                                _quat2axisangle(obs["robot0_eef_quat"]),
+                                obs["robot0_gripper_qpos"],
+                            )
+                        )
+                    )
+
                     # Execute action in environment
                     obs, reward, done, info = env.step(action.tolist())
                     if done:
@@ -164,13 +205,29 @@ def eval_libero(args: Args) -> None:
             task_episodes += 1
             total_episodes += 1
 
+            # # Save a replay video of the episode
+            # suffix = "success" if done else "failure"
+            # task_segment = task_description.replace(" ", "_")
+            # imageio.mimwrite(
+            #     pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_{suffix}.mp4",
+            #     [np.asarray(x) for x in replay_images],
+            #     fps=10,
+            # )
+
             # Save a replay video of the episode
             suffix = "success" if done else "failure"
-            task_segment = task_description.replace(" ", "_")
+            task_segment = task_description.replace(" ", "_").replace("/", "_")
             imageio.mimwrite(
-                pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_{suffix}.mp4",
+                pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_ep{episode_idx+1:03d}_{suffix}.mp4",
                 [np.asarray(x) for x in replay_images],
                 fps=10,
+            )
+
+            # Save state trajectory alongside the video
+            states_arr = np.stack(episode_states) if episode_states else np.empty((0,), dtype=np.float32)
+            np.save(
+                pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_ep{episode_idx+1:03d}_{suffix}_states.npy",
+                states_arr,
             )
 
             # Log current results
@@ -182,8 +239,69 @@ def eval_libero(args: Args) -> None:
         logging.info(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
         logging.info(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
 
-    logging.info(f"Total success rate: {float(total_successes) / float(total_episodes)}")
+    if total_episodes > 0:
+        logging.info(f"Total success rate: {float(total_successes) / float(total_episodes)}")
     logging.info(f"Total episodes: {total_episodes}")
+
+
+def _orbit_agentview(env, angle_deg: float, center_xy) -> None:
+    """Rotate agentview around the world +Z axis through center_xy by angle_deg (CCW viewed from +Z)."""
+    if angle_deg == 0.0:
+        return
+    cam_id = env.sim.model.camera_name2id("agentview")
+    pos = env.sim.model.cam_pos[cam_id].copy()
+    quat = env.sim.model.cam_quat[cam_id].copy()  # MuJoCo convention: (w, x, y, z)
+    cx, cy = center_xy
+    theta = math.radians(angle_deg)
+    c, s = math.cos(theta), math.sin(theta)
+    dx, dy = pos[0] - cx, pos[1] - cy
+    pos[0] = cx + c * dx - s * dy
+    pos[1] = cy + s * dx + c * dy
+    qw, qx, qy, qz = quat
+    qrw, qrz = math.cos(theta / 2), math.sin(theta / 2)
+    env.sim.model.cam_pos[cam_id] = pos
+    env.sim.model.cam_quat[cam_id] = np.array([
+        qrw * qw - qrz * qz,
+        qrw * qx - qrz * qy,
+        qrw * qy + qrz * qx,
+        qrw * qz + qrz * qw,
+    ])
+    env.sim.forward()
+
+
+def _translate_agentview(env, back: float, up: float, right: float = 0.0) -> None:
+    """Translate agentview in meters: `back` along camera's local +Z (away from look dir),
+    `up` along world +Z, `right` along camera's local +X (image right). Applied after any orbit."""
+    if back == 0.0 and up == 0.0 and right == 0.0:
+        return
+    cam_id = env.sim.model.camera_name2id("agentview")
+    pos = env.sim.model.cam_pos[cam_id].copy()
+    qw, qx, qy, qz = env.sim.model.cam_quat[cam_id]
+    # Camera's local +Z in world coords (look dir is local -Z, so +Z is backward).
+    back_dir = np.array([
+        2.0 * (qx * qz + qw * qy),
+        2.0 * (qy * qz - qw * qx),
+        1.0 - 2.0 * (qx * qx + qy * qy),
+    ])
+    # Camera's local +X in world coords (image right).
+    right_dir = np.array([
+        1.0 - 2.0 * (qy * qy + qz * qz),
+        2.0 * (qx * qy + qw * qz),
+        2.0 * (qx * qz - qw * qy),
+    ])
+    pos = pos + back * back_dir + right * right_dir + up * np.array([0.0, 0.0, 1.0])
+    env.sim.model.cam_pos[cam_id] = pos
+    env.sim.forward()
+
+
+def _scene_type_from_task_name(name: str) -> str:
+    if name.startswith("KITCHEN_"):
+        return "kitchen"
+    if name.startswith("LIVING_ROOM_"):
+        return "living_room"
+    if name.startswith("STUDY_"):
+        return "study"
+    return "default"
 
 
 def _get_libero_env(task, resolution, seed):
