@@ -20,6 +20,7 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.oracle_policy as oracle_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -89,6 +90,17 @@ class DataConfig:
 
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
+
+    # If true, the LeRobot dataset will decode only one randomly-chosen camera per __getitem__
+    # (out of all video features declared in info.json), exposed under the key `observation/image`.
+    # Use this for multi-view data augmentation.
+    use_random_camera: bool = False
+
+    # If set, the LeRobot dataset will decode only this specific camera per __getitem__,
+    # exposed under the key `observation/image`. Use this for single-camera training without
+    # the I/O cost of decoding all cameras declared in info.json. Mutually exclusive with
+    # use_random_camera.
+    fixed_camera_key: str | None = None
 
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
@@ -463,6 +475,70 @@ class LeRobotDROIDDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
+class LeRobotOracleDataConfig(DataConfigFactory):
+    """Franka Oracle dataset (single camera, 9-dim joint state + 9-dim joint actions).
+
+    Dataset layout (LeRobot v2.1):
+      observation.images.cam_<angle>deg   videos (only cam_30deg is used)
+      observation.state                   9-dim absolute joint angles (7 joints + 2 fingers)
+      action                              9-dim absolute joint targets (7 joints + 2 fingers)
+
+    State and action share the same joint space, which is required by DeltaActions
+    and matches Pi0's pretraining distribution.
+    """
+
+    # Which camera angle to use as the single third-person view (ignored when random_camera=True).
+    camera_key: str = "observation.images.cam_30deg"
+    # If True, decode only one randomly-chosen camera per sample (multi-view augmentation).
+    # When True, info.json must declare all camera videos to randomize over.
+    random_camera: bool = False
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # Both random and fixed single-camera modes go through RandomCameraLeRobotDataset,
+        # which exposes the chosen camera frame under the stable key "observation/image".
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/image": "observation/image",
+                        "observation/state": "observation.state",
+                        "actions": "action",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+
+        data_transforms = _transforms.Group(
+            inputs=[oracle_policy.OracleInputs(model_type=model_config.model_type)],
+            outputs=[oracle_policy.OracleOutputs()],
+        )
+
+        # Dataset actions are absolute joint targets (7 joints) + absolute finger positions (2 fingers).
+        # Convert the joint dims to deltas; keep the finger dims absolute.
+        delta_action_mask = _transforms.make_bool_mask(7, -2)
+        data_transforms = data_transforms.push(
+            inputs=[_transforms.DeltaActions(delta_action_mask)],
+            outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+        )
+
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            # Oracle parquet stores actions under the column name `action` (singular), not `actions`.
+            action_sequence_keys=("action",),
+            # Random mode iterates over all video_keys; fixed mode pins to `camera_key`.
+            use_random_camera=self.random_camera,
+            fixed_camera_key=None if self.random_camera else self.camera_key,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
 class TrainConfig:
     # Name of the config. Must be unique. Will be used to reference this config.
     name: tyro.conf.Suppress[str]
@@ -820,6 +896,86 @@ _CONFIGS = [
             action_expert_variant="gemma_300m_lora",
         ).get_freeze_filter(),
         # wandb_enabled=False,
+    ),
+    #
+    # Fine-tuning Franka Oracle v5 lift configs (single-task lift_cube, 19 cameras 0-90deg, 10 episodes).
+    #
+    TrainConfig(
+        name="pi05_oracle_lift_lora_multi",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotOracleDataConfig(
+            repo_id="/root/share/datasets/dataset_v5_2_lift_10eps_lerobot",
+            base_config=DataConfig(prompt_from_task=True),
+            random_camera=True,
+        ),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=50,
+            peak_lr=5e-5,
+            decay_steps=300,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=None,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params"
+        ),
+        pytorch_weight_path="/root/share/models/openpi/openpi-assets/checkpoints/pi05_base_pytorch",
+        num_train_steps=300,
+        save_interval=100,
+        keep_period=100,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+    ),
+    TrainConfig(
+        name="pi05_oracle_lift_lora_single",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotOracleDataConfig(
+            repo_id="/root/share/datasets/dataset_v5_2_lift_10eps_lerobot",
+            base_config=DataConfig(prompt_from_task=True),
+            random_camera=False,
+            camera_key="observation.images.cam_45deg",
+        ),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=50,
+            peak_lr=5e-5,
+            decay_steps=300,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=None,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params"
+        ),
+        pytorch_weight_path="/root/share/models/openpi/openpi-assets/checkpoints/pi05_base_pytorch",
+        num_train_steps=300,
+        save_interval=100,
+        keep_period=100,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
     ),
     #
     # Fine-tuning Aloha configs.
