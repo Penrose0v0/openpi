@@ -977,6 +977,84 @@ _CONFIGS = [
             action_expert_variant="gemma_300m_lora",
         ).get_freeze_filter(),
     ),
+
+    TrainConfig(
+        name="pi05_geomav_02_lift_lora",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotOracleDataConfig(
+            repo_id="/root/share/datasets/02_lift",
+            base_config=DataConfig(prompt_from_task=True),
+            random_camera=True,
+        ),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=50,
+            peak_lr=5e-5,
+            decay_steps=300,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=None,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params"
+        ),
+        pytorch_weight_path="/root/share/models/openpi/openpi-assets/checkpoints/pi05_base_pytorch",
+        num_train_steps=300,
+        save_interval=100,
+        keep_period=100,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+    ),
+
+    TrainConfig(
+        name="pi05_geomav_03_place_lora",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotOracleDataConfig(
+            repo_id="/root/share/datasets/03_place",
+            base_config=DataConfig(prompt_from_task=True),
+            random_camera=True,
+        ),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=50,
+            peak_lr=5e-5,
+            decay_steps=300,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=None,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params"
+        ),
+        pytorch_weight_path="/root/share/models/openpi/openpi-assets/checkpoints/pi05_base_pytorch",
+        num_train_steps=300,
+        save_interval=100,
+        keep_period=100,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+    ),
     #
     # Fine-tuning Aloha configs.
     #
