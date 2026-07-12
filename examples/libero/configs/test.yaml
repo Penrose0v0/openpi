@@ -1,5 +1,5 @@
 # Test LIBERO evaluation config.
-# Run with:  uv run main.py --config configs/test.yaml
+# Run with:  uv run main.py --args.config configs/test.yaml
 
 # Model server
 host: "0.0.0.0"
