@@ -16,6 +16,15 @@ import openpi.training.config as _config
 from openpi.training.droid_rlds_dataset import DroidRldsDataset
 import openpi.transforms as _transforms
 
+# Backwards-compat shim: datasets>=4.0 renamed the list feature `Sequence` to `List` and
+# embeds `{"_type": "List"}` in the parquet schema metadata. Datasets created with the newer
+# version therefore fail to load under the older `datasets` pinned here. Register `List` as an
+# alias of `Sequence` so such schemas deserialize (no-op if `datasets` already knows `List`).
+from datasets.features import features as _hf_features  # noqa: E402
+
+if "List" not in _hf_features._FEATURE_TYPES:
+    _hf_features._FEATURE_TYPES["List"] = _hf_features.Sequence
+
 T_co = TypeVar("T_co", covariant=True)
 
 
