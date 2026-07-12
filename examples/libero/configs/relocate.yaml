@@ -1,0 +1,43 @@
+# Eval config for models trained on the relocate_camera datasets
+# (libero_view45 / libero_all_views). Reproduces the data-collection camera:
+# the agentview orbits around the objects-of-interest centroid with azimuth/radius/
+# elevation applied as DELTAS from the original agentview, always re-aiming at the
+# centroid. This is the ONLY camera mode that matches those training viewpoints.
+#
+# IMPORTANT:
+#   * policy_image_flip MUST be "vflip" (those datasets were written with raw[::-1],
+#     not the standard openpi raw[::-1, ::-1]).
+#   * radius_delta / elevation_delta below are placeholders — set them to whatever
+#     calibrate_camera.py reports as the best match against libero_view45.
+#   * To sweep camera angle, change agentview's `azimuth_delta` (0/15/30/45/60/75/90,
+#     plus e.g. -15/105 for extrapolation). See sweep_angles.sh.
+
+host: "0.0.0.0"
+port: 8000
+resize_size: 224
+replan_steps: 5
+
+task_suite_name: libero_object
+num_steps_wait: 10
+num_trials_per_task: 50
+one_task_per_scene_type: false
+
+camera_resolution: 256
+seed: 7
+
+# Flip convention of the training data — vflip for relocate_camera datasets.
+policy_image_flip: vflip
+
+policy_image_camera: agentview
+policy_wrist_camera: robot0_eye_in_hand
+
+cameras:
+  - name: agentview
+    orbit_object_centroid: true
+    azimuth_delta: 0      # <-- the swept variable ("0-90 degrees")
+    radius_delta: 0.8      # <-- set from calibrate_camera.py
+    elevation_delta: 0.0   # <-- set from calibrate_camera.py
+    rotate_180: false      # saved video uses vflip to match training orientation
+
+  - name: robot0_eye_in_hand
+    save: false

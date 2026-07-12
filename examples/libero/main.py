@@ -41,6 +41,21 @@ class CameraConfig:
     # Apply 180-degree rotation when storing the rendered image (matches LIBERO training convention).
     rotate_180: bool = True
 
+    # --- Object-centroid orbit mode (matches the data-collection renderer) ---------------
+    # When True, ignore the world-Z orbit/offset fields above and instead reposition the
+    # camera exactly like relocate_camera/scripts/render_relocated.py: orbit on a sphere
+    # around a per-scene look-at center (the objects-of-interest centroid, projected onto
+    # the ORIGINAL agentview sightline), always re-aiming at that center. radius/azimuth/
+    # elevation are DELTAS relative to the original agentview pose, so (0,0,0) reproduces
+    # the original view. This is the ONLY way to reproduce the libero_various_view /
+    # libero_all_views / libero_view45 training viewpoints.
+    orbit_object_centroid: bool = False
+    radius_delta: float = 0.0
+    azimuth_delta: float = 0.0
+    elevation_delta: float = 0.0
+    # Optional fixed look-at center (x, y, z). None -> objects-of-interest centroid.
+    center: Optional[Tuple[float, float, float]] = None
+
 
 @dataclasses.dataclass
 class ExperimentConfig:
@@ -66,6 +81,12 @@ class ExperimentConfig:
     policy_image_camera: str = "agentview"
     policy_wrist_camera: str = "robot0_eye_in_hand"
 
+    # How to flip the raw MuJoCo render before feeding it to the policy. Must match how the
+    # TRAINING data was written. Standard openpi LIBERO data uses "rot180" (raw[::-1, ::-1]).
+    # The relocate_camera datasets (libero_view45 / libero_all_views) were written with a
+    # VERTICAL flip only (raw[::-1]) -> use "vflip" when evaluating models trained on them.
+    policy_image_flip: str = "rot180"
+
     # All cameras to render. Order matters only for readability.
     cameras: list = dataclasses.field(default_factory=list)
 
@@ -82,7 +103,7 @@ def _load_config(path: pathlib.Path) -> ExperimentConfig:
     cams = []
     for entry in cameras_raw:
         # Normalize tuple-typed fields (yaml gives lists).
-        for key in ("pos", "quat", "orbit_center"):
+        for key in ("pos", "quat", "orbit_center", "center"):
             if key in entry and entry[key] is not None:
                 entry[key] = tuple(entry[key])
         cams.append(CameraConfig(**entry))
@@ -105,10 +126,19 @@ def _validate_config(cfg: ExperimentConfig) -> None:
         raise ValueError(
             f"policy_wrist_camera={cfg.policy_wrist_camera!r} must appear in cameras list ({names})."
         )
+    if cfg.policy_image_flip not in ("rot180", "vflip"):
+        raise ValueError(
+            f"policy_image_flip must be 'rot180' or 'vflip', got {cfg.policy_image_flip!r}."
+        )
     for c in cfg.cameras:
         if (c.pos is None) != (c.quat is None):
             raise ValueError(
                 f"Camera {c.name!r}: pos and quat must be set together (got pos={c.pos}, quat={c.quat})."
+            )
+        if c.orbit_object_centroid and (c.pos is not None or c.orbit_deg != 0.0):
+            raise ValueError(
+                f"Camera {c.name!r}: orbit_object_centroid is mutually exclusive with "
+                f"pos/quat and world-Z orbit_deg. Use radius/azimuth/elevation_delta instead."
             )
 
 
@@ -171,12 +201,23 @@ def eval_libero(args: Args) -> None:
 
             env.reset()
             # robosuite's reset rebuilds the model, restoring cam_pos to XML values.
-            # Re-apply per-camera pose every reset.
+            # Re-apply per-camera pose every reset. World-Z orbit/offset cameras are
+            # scene-independent, so they can be placed now. Object-centroid cameras need
+            # the object positions, so they're placed AFTER set_init_state below.
             for cam in cfg.cameras:
                 _apply_camera_pose(env, cam)
             action_plan = collections.deque()
 
             obs = env.set_init_state(initial_states[episode_idx])
+
+            # Object-centroid orbit cameras depend on this episode's object layout (matching
+            # the data-collection renderer, which places the camera from states[0]). Place
+            # them now, then re-render so `obs` reflects the relocated camera.
+            obj_cams = [c for c in cfg.cameras if c.orbit_object_centroid]
+            if obj_cams:
+                for cam in obj_cams:
+                    _apply_orbit_object_centroid(env, cam)
+                obs = env.set_init_state(initial_states[episode_idx])
 
             t = 0
             replay_per_cam: dict[str, list] = {c.name: [] for c in cfg.cameras if c.save}
@@ -191,12 +232,12 @@ def eval_libero(args: Args) -> None:
                         t += 1
                         continue
 
-                    # Policy input images: rotate 180 + resize, matching training preprocessing.
+                    # Policy input images: flip (per training convention) + resize.
                     policy_img = _prepare_policy_image(
-                        obs[f"{cfg.policy_image_camera}_image"], cfg.resize_size
+                        obs[f"{cfg.policy_image_camera}_image"], cfg.resize_size, cfg.policy_image_flip
                     )
                     wrist_img = _prepare_policy_image(
-                        obs[f"{cfg.policy_wrist_camera}_image"], cfg.resize_size
+                        obs[f"{cfg.policy_wrist_camera}_image"], cfg.resize_size, cfg.policy_image_flip
                     )
 
                     # Append each requested camera's frame to its replay buffer.
@@ -284,8 +325,11 @@ def eval_libero(args: Args) -> None:
     logging.info(f"Total episodes: {total_episodes}")
 
 
-def _prepare_policy_image(raw, resize_size: int):
-    img = np.ascontiguousarray(raw[::-1, ::-1])
+def _prepare_policy_image(raw, resize_size: int, flip: str = "rot180"):
+    # "rot180": raw[::-1, ::-1] (standard openpi LIBERO convention).
+    # "vflip":  raw[::-1]       (relocate_camera datasets: view45 / all_views).
+    flipped = raw[::-1, ::-1] if flip == "rot180" else raw[::-1]
+    img = np.ascontiguousarray(flipped)
     return image_tools.convert_to_uint8(image_tools.resize_with_pad(img, resize_size, resize_size))
 
 
@@ -389,6 +433,8 @@ def _install_custom_cameras(cameras: list) -> None:
 
 def _apply_camera_pose(env, cam: CameraConfig) -> None:
     """Apply absolute pose override (if any) then orbit + translate to the named camera."""
+    if cam.orbit_object_centroid:
+        return  # placed after set_init_state via _apply_orbit_object_centroid
     if (
         cam.pos is None
         and cam.quat is None
@@ -447,6 +493,162 @@ def _translate_camera(env, cam_id: int, back: float, up: float, right: float) ->
     ])
     pos = pos + back * back_dir + right * right_dir + up * np.array([0.0, 0.0, 1.0])
     env.sim.model.cam_pos[cam_id] = pos
+
+
+# ----------------------------------------------------------------------------- #
+# Object-centroid orbit camera. Ported verbatim from the data-collection renderer
+# (relocate_camera/scripts/render_relocated.py) so eval reproduces the exact
+# training viewpoints. MuJoCo: camera looks along local -z, +x right, +y up;
+# quaternion stored wxyz.
+# ----------------------------------------------------------------------------- #
+def _mat_to_quat_wxyz(R):
+    t = np.trace(R)
+    if t > 0:
+        s = np.sqrt(t + 1.0) * 2
+        w = 0.25 * s
+        x = (R[2, 1] - R[1, 2]) / s
+        y = (R[0, 2] - R[2, 0]) / s
+        z = (R[1, 0] - R[0, 1]) / s
+    else:
+        i = int(np.argmax([R[0, 0], R[1, 1], R[2, 2]]))
+        if i == 0:
+            s = np.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2]) * 2
+            w = (R[2, 1] - R[1, 2]) / s
+            x = 0.25 * s
+            y = (R[0, 1] + R[1, 0]) / s
+            z = (R[0, 2] + R[2, 0]) / s
+        elif i == 1:
+            s = np.sqrt(1.0 - R[0, 0] + R[1, 1] - R[2, 2]) * 2
+            w = (R[0, 2] - R[2, 0]) / s
+            x = (R[0, 1] + R[1, 0]) / s
+            y = 0.25 * s
+            z = (R[1, 2] + R[2, 1]) / s
+        else:
+            s = np.sqrt(1.0 - R[0, 0] - R[1, 1] + R[2, 2]) * 2
+            w = (R[1, 0] - R[0, 1]) / s
+            x = (R[0, 2] + R[2, 0]) / s
+            y = (R[1, 2] + R[2, 1]) / s
+            z = 0.25 * s
+    return np.array([w, x, y, z])
+
+
+def _look_at_quat(pos, center, world_up=np.array([0.0, 0.0, 1.0])):
+    """Quaternion (wxyz) orienting a MuJoCo camera at `pos` to look at `center`."""
+    z = pos - center  # camera +z points from the target back toward the camera
+    z = z / np.linalg.norm(z)
+    x = np.cross(world_up, z)
+    if np.linalg.norm(x) < 1e-6:  # looking straight down/up: pick an arbitrary right
+        x = np.array([1.0, 0.0, 0.0])
+    x = x / np.linalg.norm(x)
+    y = np.cross(z, x)
+    R = np.stack([x, y, z], axis=1)
+    return _mat_to_quat_wxyz(R)
+
+
+def _orbit_pose(center, radius, azimuth_deg, elevation_deg):
+    """Camera (pos, quat) on an orbit of `radius` around `center`."""
+    az = np.radians(azimuth_deg)
+    el = np.radians(elevation_deg)
+    offset = radius * np.array([np.cos(el) * np.cos(az), np.cos(el) * np.sin(az), np.sin(el)])
+    pos = np.asarray(center, dtype=float) + offset
+    return pos, _look_at_quat(pos, center)
+
+
+def _quat_to_mat(q):
+    """Rotation matrix from a MuJoCo quaternion (wxyz)."""
+    w, x, y, z = q
+    n = w * w + x * x + y * y + z * z
+    if n < 1e-12:
+        return np.eye(3)
+    s = 2.0 / n
+    return np.array([
+        [1 - s * (y * y + z * z), s * (x * y - z * w), s * (x * z + y * w)],
+        [s * (x * y + z * w), 1 - s * (x * x + z * z), s * (y * z - x * w)],
+        [s * (x * z - y * w), s * (y * z + x * w), 1 - s * (x * x + y * y)],
+    ])
+
+
+def _axis_pivot(orig_pos, orig_quat, target):
+    """Pivot on the original camera's optical axis nearest the target, so deltas of
+    (0,0,0) recover the original camera pose exactly on every task suite."""
+    fwd = -_quat_to_mat(orig_quat)[:, 2]
+    d = float(np.dot(np.asarray(target, dtype=float) - orig_pos, fwd))
+    return orig_pos + d * fwd
+
+
+def _spherical_of(pos, center):
+    """Inverse of _orbit_pose's position: (radius, azimuth_deg, elevation_deg)."""
+    v = np.asarray(pos, dtype=float) - np.asarray(center, dtype=float)
+    r = np.linalg.norm(v)
+    az = np.degrees(np.arctan2(v[1], v[0]))
+    el = np.degrees(np.arcsin(np.clip(v[2] / r, -1.0, 1.0)))
+    return r, az, el
+
+
+def _resolve_obj_pos(sim, name):
+    """Best-effort world position for an object-of-interest name."""
+    bodies = set(sim.model.body_names)
+    try:
+        sites = set(sim.model.site_names)
+    except Exception:
+        sites = set()
+    for cand in (name + "_main", name):
+        if cand in bodies:
+            return np.array(sim.data.body_xpos[sim.model.body_name2id(cand)])
+    if name in sites:
+        return np.array(sim.data.site_xpos[sim.model.site_name2id(name)])
+    toks = name.split("_")
+    for k in range(len(toks) - 1, 0, -1):  # strip trailing tokens -> parent object
+        base = "_".join(toks[:k])
+        for cand in (base + "_main", base):
+            if cand in bodies:
+                return np.array(sim.data.body_xpos[sim.model.body_name2id(cand)])
+    return None
+
+
+def _compute_center(env, override):
+    """Look-at target: CLI override, else centroid of objects-of-interest."""
+    if override is not None:
+        return np.asarray(override, dtype=float)
+    sim = env.sim
+    pts = [p for obj in env.env.obj_of_interest if (p := _resolve_obj_pos(sim, obj)) is not None]
+    if not pts:  # fall back to all rigid object bodies ('*_main', minus robot/mount)
+        pts = [
+            np.array(sim.data.body_xpos[sim.model.body_name2id(b)])
+            for b in sim.model.body_names
+            if b.endswith("_main") and not b.startswith(("robot", "gripper", "mount"))
+        ]
+    center = np.mean(pts, axis=0)
+    center[2] += 0.05  # lift slightly off the floor toward object bodies
+    return center
+
+
+def _apply_orbit_object_centroid(env, cam: CameraConfig) -> None:
+    """Reposition `cam` exactly like render_relocated.py: orbit around the objects-of-interest
+    centroid (projected onto the original sightline), re-aiming at it, with radius/azimuth/
+    elevation applied as DELTAS from the original camera pose. Must run AFTER set_init_state
+    so object positions are set."""
+    cid = env.sim.model.camera_name2id(cam.name)
+    # The current pose (post-reset, pre-relocation) IS LIBERO's original camera pose.
+    orig_pos = np.array(env.sim.model.cam_pos[cid], dtype=float)
+    orig_quat = np.array(env.sim.model.cam_quat[cid], dtype=float)
+
+    target = _compute_center(env, cam.center)
+    if cam.center is not None:
+        center = np.asarray(cam.center, dtype=float)
+    else:
+        center = _axis_pivot(orig_pos, orig_quat, target)
+
+    r0, az0, el0 = _spherical_of(orig_pos, center)
+    cam_pos, cam_quat = _orbit_pose(
+        center,
+        r0 + cam.radius_delta,
+        az0 + cam.azimuth_delta,
+        el0 + cam.elevation_delta,
+    )
+    env.sim.model.cam_pos[cid] = cam_pos
+    env.sim.model.cam_quat[cid] = cam_quat
+    env.sim.forward()
 
 
 def _scene_type_from_task_name(name: str) -> str:
