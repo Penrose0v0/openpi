@@ -36,6 +36,8 @@ def main():
     p.add_argument("--sweep_dir", default="data/sweep")
     p.add_argument("--out_csv", default="sweep.csv")
     p.add_argument("--out_png", default="sweep.png")
+    p.add_argument("--per-suite", action="store_true",
+                   help="also write one summary_<suite>.png/.csv per suite next to --out_png")
     args = p.parse_args()
 
     rows = []
@@ -102,6 +104,33 @@ def main():
     fig.tight_layout()
     fig.savefig(args.out_png, dpi=130)
     print(f"wrote {args.out_png}")
+
+    if args.per_suite:
+        base, ext = os.path.splitext(args.out_png)          # e.g. .../summary + .png
+        csv_base = os.path.splitext(args.out_csv)[0]
+        for suite in suites:
+            srows = [r for r in rows if r["suite"] == suite]
+            # per-suite csv
+            with open(f"{csv_base}_{suite}.csv", "w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=["model", "suite", "azimuth", "success_rate"])
+                w.writeheader()
+                w.writerows(srows)
+            # per-suite png
+            fig1, ax = plt.subplots(figsize=(5, 4))
+            for model in sorted({r["model"] for r in srows}):
+                g = sorted([r for r in srows if r["model"] == model], key=lambda r: r["azimuth"])
+                ax.plot([r["azimuth"] for r in g], [r["success_rate"] for r in g],
+                        marker="o", label=model)
+            ax.axvspan(0, 90, color="gray", alpha=0.08)
+            ax.set_title(suite)
+            ax.set_xlabel("camera azimuth delta (deg)")
+            ax.set_ylabel("success rate")
+            ax.set_ylim(0, 1)
+            ax.grid(True, alpha=0.3)
+            ax.legend()
+            fig1.tight_layout()
+            fig1.savefig(f"{base}_{suite}{ext}", dpi=130)
+            print(f"wrote {base}_{suite}{ext}")
 
 
 if __name__ == "__main__":

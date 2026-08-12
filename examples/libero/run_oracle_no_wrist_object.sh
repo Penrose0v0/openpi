@@ -1,39 +1,38 @@
 #!/usr/bin/env bash
-# One-shot Oracle (object set) experiment:
-#   1. starts the pi05 policy server for the Oracle model (config pi05_libero_oracle_lora),
+# One-shot Oracle-without-wrist (object set) experiment:
+#   1. starts the pi05 server for the no-wrist oracle (config pi05_libero_oracle_no_wrist_lora,
+#      trained on libero_all_views with the wrist view dropped -> served with use_wrist=False,
+#      so the wrist slot is zero-padded and masked to match training),
 #   2. waits until it's serving,
 #   3. runs the libero_object eval at azimuths 0 / 45 / 90 in sequence,
 #   4. aggregates results, then ALWAYS stops the server (even on error / Ctrl-C).
 #
-# The server and the eval run as separate process groups; a trap kills the server on exit
-# so nothing is left holding the GPU.
+# The eval side is unchanged: main.py still sends observation/wrist_image; the SERVER's
+# use_wrist=False transform masks it out. Only the served config differs from the with-wrist
+# oracle.
 #
 # Usage (defaults shown):
-#   examples/libero/run_oracle_object.sh
-#   ORACLE_DIR=/path/to/ckpt SERVER_GPU=1 SIM_GPU=0 examples/libero/run_oracle_object.sh
-#
-# Watch progress in another shell:
-#   tail -f oracle_server.log                      # model loading / server
-#   tail -f examples/libero/data/sweep/oracle_libero_object_az45.log   # a given angle
+#   examples/libero/run_oracle_no_wrist_object.sh
+#   CKPT_DIR=/path/to/ckpt AZIMUTHS="0 45 90" SERVER_GPU=7 SIM_GPU=7 examples/libero/run_oracle_no_wrist_object.sh
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 
 # ---- config (override via env) ----------------------------------------------
-ORACLE_DIR="${ORACLE_DIR:-/root/workspace/checkpoints/pi05_libero_oracle_lora/libero_oracle/29999}"
-POLICY_CONFIG="${POLICY_CONFIG:-pi05_libero_oracle_lora}"
+CKPT_DIR="${CKPT_DIR:-/root/workspace/checkpoints/pi05_libero_oracle_lora/libero_oracle_without_wrist/29999}"
+POLICY_CONFIG="${POLICY_CONFIG:-pi05_libero_oracle_no_wrist_lora}"
 TASK_SUITE="${TASK_SUITE:-libero_object}"
 AZIMUTHS="${AZIMUTHS:-0 45 90}"
-SERVER_GPU="${SERVER_GPU:-0}"          # GPU for the policy server
-SIM_GPU="${SIM_GPU:-0}"                # GPU for MuJoCo/EGL rendering
+SERVER_GPU="${SERVER_GPU:-1}"          # GPU for the policy server
+SIM_GPU="${SIM_GPU:-1}"                # GPU for MuJoCo/EGL rendering
 MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.4}"
 PORT="${PORT:-8000}"
 READY_TIMEOUT="${READY_TIMEOUT:-1800}" # seconds to wait for the server to come up
-SERVER_LOG="$REPO/oracle_server.log"
+SERVER_LOG="$REPO/oracle_no_wrist_server.log"
 LIBERO_VENV="${LIBERO_VENV:-$HERE/.venv}"   # eval env (separate from the uv-managed server env)
 
-[ -d "$ORACLE_DIR/params" ] || { echo "ERROR: no 'params' under ORACLE_DIR=$ORACLE_DIR"; exit 1; }
+[ -d "$CKPT_DIR/params" ] || { echo "ERROR: no 'params' under CKPT_DIR=$CKPT_DIR"; exit 1; }
 
 # ---- server lifecycle -------------------------------------------------------
 SERVER_PID=""
@@ -47,15 +46,15 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-echo "[orchestrator] starting Oracle server"
+echo "[orchestrator] starting Oracle-no-wrist server"
 echo "    config : $POLICY_CONFIG"
-echo "    dir    : $ORACLE_DIR"
+echo "    dir    : $CKPT_DIR"
 echo "    gpu    : $SERVER_GPU  (mem_fraction=$MEM_FRACTION)  port=$PORT"
 cd "$REPO"
 # setsid -> new process group, so the trap can kill uv + python + children together.
 setsid env CUDA_VISIBLE_DEVICES="$SERVER_GPU" XLA_PYTHON_CLIENT_MEM_FRACTION="$MEM_FRACTION" \
   uv run scripts/serve_policy.py --port "$PORT" policy:checkpoint \
-    --policy.config="$POLICY_CONFIG" --policy.dir="$ORACLE_DIR" \
+    --policy.config="$POLICY_CONFIG" --policy.dir="$CKPT_DIR" \
     > "$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 echo "[orchestrator] server process group $SERVER_PID -> log: $SERVER_LOG"
@@ -85,9 +84,9 @@ source "$LIBERO_VENV/bin/activate"
 set -u
 export PYTHONPATH="${PYTHONPATH:-}:$REPO/third_party/libero"
 
-# ---- run the three-angle sweep ----------------------------------------------
-echo "[orchestrator] eval: model=oracle suite=$TASK_SUITE azimuths='$AZIMUTHS' (sim on GPU $SIM_GPU)"
-MODEL_TAG=oracle TASK_SUITE="$TASK_SUITE" AZIMUTHS="$AZIMUTHS" PORT="$PORT" \
+# ---- run the sweep ----------------------------------------------------------
+echo "[orchestrator] eval: model=oracle_nowrist suite=$TASK_SUITE azimuths='$AZIMUTHS' (sim on GPU $SIM_GPU)"
+MODEL_TAG=oracle_nowrist TASK_SUITE="$TASK_SUITE" AZIMUTHS="$AZIMUTHS" PORT="$PORT" \
   MUJOCO_EGL_DEVICE_ID="$SIM_GPU" \
   bash "$HERE/sweep_angles.sh"
 
@@ -95,7 +94,7 @@ MODEL_TAG=oracle TASK_SUITE="$TASK_SUITE" AZIMUTHS="$AZIMUTHS" PORT="$PORT" \
 SWEEP_DIR="$REPO/data/sweep/$TASK_SUITE"
 echo "[orchestrator] aggregating results in $SWEEP_DIR ..."
 python "$HERE/plot_sweep.py" --sweep_dir "$SWEEP_DIR" \
-  --out_csv "$SWEEP_DIR/oracle_summary.csv" \
-  --out_png "$SWEEP_DIR/oracle_summary.png" || true
+  --out_csv "$SWEEP_DIR/summary.csv" \
+  --out_png "$SWEEP_DIR/summary.png" || true
 
 echo "[orchestrator] DONE. Server will be stopped by the trap now."

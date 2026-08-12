@@ -13,6 +13,7 @@
 #   MODEL_TAG=allviews TASK_SUITE=libero_object AZIMUTHS="-15 0 15 30 45 60 75 90 105" bash examples/libero/sweep_angles.sh
 set -euo pipefail
 cd "$(dirname "$0")"
+REPO="$(cd ../.. && pwd)"
 
 MODEL_TAG="${MODEL_TAG:?set MODEL_TAG, e.g. view45 or allviews}"
 TASK_SUITE="${TASK_SUITE:-libero_object}"
@@ -20,11 +21,14 @@ AZIMUTHS="${AZIMUTHS:-0 15 30 45 60 75 90}"
 PORT="${PORT:-8000}"
 EGL_DEVICE="${MUJOCO_EGL_DEVICE_ID:-0}"
 BASE="configs/relocate.yaml"
+OUT_ROOT="${SWEEP_OUT:-$REPO/data/sweep/$TASK_SUITE}"   # per-suite: /root/workspace/data/sweep/<suite>
+
+mkdir -p "$OUT_ROOT"  # tee targets $OUT_ROOT/<name>.log; must exist before the pipeline
 
 for az in $AZIMUTHS; do
   name="${MODEL_TAG}_${TASK_SUITE}_az${az}"
   cfg="configs/_gen_${name}.yaml"
-  video_dir="data/sweep/${name}"
+  video_dir="$OUT_ROOT/${name}"
 
   # Patch azimuth_delta, task suite, port, and output dir into a generated config.
   python - "$BASE" "$cfg" "$az" "$TASK_SUITE" "$PORT" "$video_dir" <<'PY'
@@ -43,13 +47,13 @@ PY
 
   echo ">>> [$name] running eval"
   MUJOCO_GL=egl PYOPENGL_PLATFORM=egl MUJOCO_EGL_DEVICE_ID="$EGL_DEVICE" \
-    python main.py --args.config "$cfg" 2>&1 | tee "data/sweep/${name}.log"
+    python main.py --args.config "$cfg" 2>&1 | tee "$OUT_ROOT/${name}.log"
   # Success rate is logged as "Total success rate: ..." at the end of each run.
 done
 
-echo "=== summary (${MODEL_TAG}, ${TASK_SUITE}) ==="
+echo "=== summary (${MODEL_TAG}, ${TASK_SUITE}) -> $OUT_ROOT ==="
 for az in $AZIMUTHS; do
-  log="data/sweep/${MODEL_TAG}_${TASK_SUITE}_az${az}.log"
+  log="$OUT_ROOT/${MODEL_TAG}_${TASK_SUITE}_az${az}.log"
   sr=$(grep -oE "Total success rate: [0-9.]+" "$log" | tail -1 || echo "n/a")
   printf "  az=%-4s %s\n" "$az" "$sr"
 done
