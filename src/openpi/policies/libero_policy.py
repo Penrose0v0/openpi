@@ -39,6 +39,11 @@ class LiberoInputs(transforms.DataTransformFn):
     # Do not change this for your own dataset.
     model_type: _model.ModelType
 
+    # If False, the wrist camera view is dropped: the ``left_wrist_0_rgb`` slot is
+    # zero-padded and masked out (same treatment as ``right_wrist_0_rgb``), so the
+    # model is trained/served using only the third-person ``base_0_rgb`` view.
+    use_wrist: bool = True
+
     def __call__(self, data: dict) -> dict:
         # Possibly need to parse images to uint8 (H,W,C) since LeRobot automatically
         # stores as float32 (C,H,W), gets skipped for policy inference.
@@ -50,20 +55,28 @@ class LiberoInputs(transforms.DataTransformFn):
         # of image, e.g. wrist images, you can comment it out here and replace it with zeros like we do for the
         # right wrist image below.
         base_image = _parse_image(data["observation/image"])
-        wrist_image = _parse_image(data["observation/wrist_image"])
+
+        # The pi0/pi05 architecture always expects three image slots, so dropping the
+        # wrist view means zero-padding and masking its slot rather than removing it.
+        if self.use_wrist:
+            left_wrist_image = _parse_image(data["observation/wrist_image"])
+            left_wrist_mask = np.True_
+        else:
+            left_wrist_image = np.zeros_like(base_image)
+            left_wrist_mask = np.True_ if self.model_type == _model.ModelType.PI0_FAST else np.False_
 
         # Create inputs dict. Do not change the keys in the dict below.
         inputs = {
             "state": data["observation/state"],
             "image": {
                 "base_0_rgb": base_image,
-                "left_wrist_0_rgb": wrist_image,
+                "left_wrist_0_rgb": left_wrist_image,
                 # Pad any non-existent images with zero-arrays of the appropriate shape.
                 "right_wrist_0_rgb": np.zeros_like(base_image),
             },
             "image_mask": {
                 "base_0_rgb": np.True_,
-                "left_wrist_0_rgb": np.True_,
+                "left_wrist_0_rgb": left_wrist_mask,
                 # We only mask padding images for pi0 model, not pi0-FAST. Do not change this for your own dataset.
                 "right_wrist_0_rgb": np.True_ if self.model_type == _model.ModelType.PI0_FAST else np.False_,
             },

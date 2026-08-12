@@ -300,6 +300,10 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
 
     extra_delta_transform: bool = False
 
+    # If False, the wrist camera view is dropped during both training and inference
+    # (its image slot is zero-padded and masked out). See ``LiberoInputs``.
+    use_wrist: bool = True
+
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         # The repack transform is *only* applied to the data coming from the dataset,
@@ -331,7 +335,7 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
         # how to modify the transforms to match your dataset. Once you created your own transforms, you can
         # replace the transforms below with your own.
         data_transforms = _transforms.Group(
-            inputs=[libero_policy.LiberoInputs(model_type=model_config.model_type)],
+            inputs=[libero_policy.LiberoInputs(model_type=model_config.model_type, use_wrist=self.use_wrist)],
             outputs=[libero_policy.LiberoOutputs()],
         )
 
@@ -914,6 +918,49 @@ _CONFIGS = [
             repo_id="/root/share/datasets/libero_related/libero_view45",
             base_config=DataConfig(prompt_from_task=True),
             extra_delta_transform=False,
+            use_wrist=True,
+        ),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=None,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params"
+        ),
+        pytorch_weight_path="/root/share/models/openpi/openpi-assets/checkpoints/pi05_base_pytorch",
+        num_train_steps=30_000,
+        save_interval=5_000,
+        keep_period=5_000,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+    ),
+    TrainConfig(
+        # Same as pi05_libero_baseline_lora but the wrist view is dropped (zero-padded and
+        # masked) at both train and inference; serve the libero_baseline_without_wrist ckpt
+        # with this config so the wrist slot is masked to match how it was trained.
+        name="pi05_libero_baseline_no_wrist_lora",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="/root/share/datasets/libero_related/libero_view45",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            use_wrist=False,
         ),
         batch_size=64,
         lr_schedule=_optimizer.CosineDecaySchedule(
@@ -952,6 +999,49 @@ _CONFIGS = [
             repo_id="/root/share/datasets/libero_related/libero_all_views",
             base_config=DataConfig(prompt_from_task=True),
             extra_delta_transform=False,
+            use_wrist=True,
+        ),
+        batch_size=64,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=None,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params"
+        ),
+        pytorch_weight_path="/root/share/models/openpi/openpi-assets/checkpoints/pi05_base_pytorch",
+        num_train_steps=30_000,
+        save_interval=5_000,
+        keep_period=5_000,
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+    ),
+    TrainConfig(
+        # Same as pi05_libero_oracle_lora but the wrist view is dropped (zero-padded and
+        # masked) at both train and inference; serve the libero_oracle_without_wrist ckpt
+        # with this config so the wrist slot is masked to match how it was trained.
+        name="pi05_libero_oracle_no_wrist_lora",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="/root/share/datasets/libero_related/libero_all_views",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+            use_wrist=False,
         ),
         batch_size=64,
         lr_schedule=_optimizer.CosineDecaySchedule(
